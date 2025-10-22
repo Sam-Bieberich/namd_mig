@@ -37,10 +37,27 @@ if command -v nvidia-smi >/dev/null 2>&1; then
   nvidia-smi
 fi
 
-# Run the command (use full paths if needed)
+# Directory containing the NAMD inputs
+WORKDIR="/scratch/11098/sambieberich/hanning_namd"
+
+echo "Changing to workdir: $WORKDIR"
+if [ ! -d "$WORKDIR" ]; then
+  echo "ERROR: workdir $WORKDIR does not exist" >&2
+  exit 2
+fi
+cd "$WORKDIR"
+
+# Check that the main NAMD input exists
+if [ ! -f stmv.namd ]; then
+  echo "ERROR: stmv.namd not found in $WORKDIR" >&2
+  ls -la "$WORKDIR"
+  exit 3
+fi
+
+# Run the command from the workdir so output files land there
 CMD=(run_namd_gpu stmv.namd test.out)
 
-echo "Running: ${CMD[*]}"
+echo "Running: ${CMD[*]} in $(pwd)"
 "${CMD[@]}"
 EXIT_CODE=$?
 
