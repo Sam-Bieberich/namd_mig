@@ -22,3 +22,7 @@ tail -f test.out
 ```
 ./local_run.sh hanning_namd/stmv.namd test.out
 ``` 
+
+## Note 10/22
+
+CPUs are not partitioned appropriately for the MIG test. 
