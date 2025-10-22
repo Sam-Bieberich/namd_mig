@@ -10,3 +10,15 @@ module load nvmath/12.6.0
 module load openmpi/5.0.5
 module load namd-gpu/3.0.1
 ```
+
+## How to see results in real time
+
+```
+tail -f test.out
+```
+
+## Protocol
+
+```
+./local_run.sh hanning_namd/stmv.namd test.out
+``` 
