@@ -8,10 +8,6 @@ set -euo pipefail
 LOG_OUT=gpu_test.out
 LOG_ERR=gpu_test.err
 
-# Redirect stdout/stderr to files while also showing on terminal
-# We'll use exec to redirect file descriptors
-exec 1> >(tee -a "$LOG_OUT")
-exec 2> >(tee -a "$LOG_ERR" >&2)
 
 echo "Starting local run at $(date)"
 
@@ -56,6 +52,13 @@ fi
 
 # Run the command from the workdir so output files land there
 CMD=(run_namd_gpu stmv.namd test.out)
+
+LOG_OUT="$WORKDIR/gpu_test.out"
+LOG_ERR="$WORKDIR/gpu_test.err"
+
+# Redirect stdout/stderr to files while also showing on terminal
+exec 1> >(tee -a "$LOG_OUT")
+exec 2> >(tee -a "$LOG_ERR" >&2)
 
 echo "Running: ${CMD[*]} in $(pwd)"
 "${CMD[@]}"
