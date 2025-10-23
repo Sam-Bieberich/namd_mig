@@ -17,9 +17,7 @@ module load namd-gpu/3.0.1
 tail -f test.out
 ```
 
-## Note 10/22
-
-CPUs are not partitioned appropriately for the MIG test.
+--------------------
 
 ## Workflow
 
@@ -39,11 +37,22 @@ bash ..run_namd_mig.sh --mig 6 hanning_namd/stmv.namd test6.out
 
 Current code puts the job in the right place, but the CPU partitioning is not yet optimal, when you run several at the same time it does not work due to slurm. 
 
-### Multiple MIG tests 
+### Multiple MIG tests (sequential) 
 
 ```bash
-
 # Each will use its own MIG slice and its own 10-core block
 ./non_srun.sh --mig 2 ../hanning_namd/stmv.namd test2.out
 ./non_srun.sh --mig 0 ../hanning_namd/stmv.namd test0.out
+```
+
+### Multiple MIG tests (parallel)
+
+```bash
+SRUN_MPI=pmi2 ./non_srun.sh --mig 0 ../hanning_namd/stmv.namd test0.out
+SRUN_MPI=pmi2 ./non_srun.sh --mig 1 ../hanning_namd/stmv.namd test1.out
+SRUN_MPI=pmi2 ./non_srun.sh --mig 2 ../hanning_namd/stmv.namd test2.out
+SRUN_MPI=pmi2 ./non_srun.sh --mig 3 ../hanning_namd/stmv.namd test3.out
+SRUN_MPI=pmi2 ./non_srun.sh --mig 4 ../hanning_namd/stmv.namd test4.out
+SRUN_MPI=pmi2 ./non_srun.sh --mig 5 ../hanning_namd/stmv.namd test5.out
+SRUN_MPI=pmi2 ./non_srun.sh --mig 6 ../hanning_namd/stmv.namd test6.out
 ```
