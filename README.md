@@ -56,3 +56,9 @@ SRUN_MPI=pmi2 ./non_srun.sh --mig 4 ../hanning_namd/stmv.namd test4.out
 SRUN_MPI=pmi2 ./non_srun.sh --mig 5 ../hanning_namd/stmv.namd test5.out
 SRUN_MPI=pmi2 ./non_srun.sh --mig 6 ../hanning_namd/stmv.namd test6.out
 ```
+
+If running with the 3-way MIG or another configuration, can adjust some parameters
+
+```bash
+MIG_SLOTS=3 TOTAL_LOGICAL_GPUS=72 SRUN_MPI=pmi2 ./non_srun.sh --mig 1 ../hanning_namd/stmv.namd test1.out
+```
