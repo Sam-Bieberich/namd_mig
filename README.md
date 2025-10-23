@@ -21,7 +21,7 @@ tail -f test.out
 
 ## Workflow
 
-First, need to ensure that MIG is running. Can check with nvidia-smi or just run 
+First, need to ensure that MIG is running. Can check with nvidia-smi or just run
 
 ```bash
 sudo bash mig_easy_setup.sh
@@ -35,9 +35,9 @@ The following command runs NAMD with MIG level 6 using the provided configuratio
 bash ..run_namd_mig.sh --mig 6 hanning_namd/stmv.namd test6.out
 ```
 
-Current code puts the job in the right place, but the CPU partitioning is not yet optimal, when you run several at the same time it does not work due to slurm. 
+Current code puts the job in the right place, but the CPU partitioning is not yet optimal, when you run several at the same time it does not work due to slurm.
 
-### Multiple MIG tests (sequential) 
+### Multiple MIG tests (sequential)
 
 ```bash
 # Each will use its own MIG slice and its own 10-core block
