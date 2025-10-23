@@ -13,16 +13,16 @@ module load namd-gpu/3.0.1
 
 ## How to see results in real time
 
-```
+```bash
 tail -f test.out
 ```
 
 ## Protocol
 
-```
+```bash
 ./local_run.sh hanning_namd/stmv.namd test.out
-``` 
+```
 
 ## Note 10/22
 
-CPUs are not partitioned appropriately for the MIG test. 
+CPUs are not partitioned appropriately for the MIG test.
