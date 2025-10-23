@@ -68,4 +68,3 @@ echo "  jobs -l"
 echo "  disown -h %<job>   # prevent SIGHUP if you close the shell"
 echo "  kill $pid          # stop the run (or 'kill %<job>')"
 ``
-
