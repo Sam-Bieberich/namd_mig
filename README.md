@@ -24,7 +24,7 @@ tail -f test.out
 First, need to ensure that MIG is running. Can check with nvidia-smi or just run
 
 ```bash
-sudo bash mig_easy_setup.sh
+sudo bash 7way_mig.sh
 ```
 
 ### Single MIG test (srun)
