@@ -161,12 +161,12 @@ if [[ "${AUTO_CPU_PIN}" == "1" ]]; then
 fi
 
 # --- Use pre-existing cgroup for this MIG partition ---
-cgroup_path="${CGROUP_MIG_BASE}/${sel_index}"
+cgroup_path="${CGROUP_MIG_BASE}/mig${sel_index}"
 
 # Verify cgroup exists
 if [[ ! -d "$cgroup_path" ]]; then
   echo "ERROR: Cgroup not found: $cgroup_path" | tee -a "$outfile"
-  echo "       Expected pre-existing cgroups at ${CGROUP_MIG_BASE}/{0..6}" | tee -a "$outfile"
+  echo "       Expected pre-existing cgroups at ${CGROUP_MIG_BASE}/mig{0..6}" | tee -a "$outfile"
   exit 2
 fi
 
