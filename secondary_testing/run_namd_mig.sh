@@ -28,9 +28,14 @@ module load namd-gpu/3.0.2
 : "${CORES_PER_MIG:=10}"
 : "${CGROUP_BASE:=/sys/fs/cgroup/mig}"
 
-# UCX settings for single-node operation
+# UCX settings for single-node operation with MIG
 export UCX_TLS="${UCX_TLS:-self,sm,cuda_copy,cuda_ipc}"
 export UCX_MEMTYPE_CACHE="${UCX_MEMTYPE_CACHE:-n}"
+export UCX_WARN_UNUSED_ENV_VARS="${UCX_WARN_UNUSED_ENV_VARS:-n}"
+
+# Additional UCX settings that help with MIG
+export UCX_IB_GPU_DIRECT_RDMA="${UCX_IB_GPU_DIRECT_RDMA:-no}"
+export UCX_RNDV_SCHEME="${UCX_RNDV_SCHEME:-put_zcopy}"
 
 # NAMD/Charm++ defaults (will be auto-configured per MIG)
 : "${DEVICES:=0}"  # Single MIG device visible = device 0

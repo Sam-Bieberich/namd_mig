@@ -177,8 +177,11 @@ echo "  $CUDA_VISIBLE_DEVICES"
 # Try nvidia-smi if available
 if command -v nvidia-smi >/dev/null 2>&1; then
     echo ""
-    echo "GPU query:"
-    nvidia-smi --id="$CUDA_VISIBLE_DEVICES" --query-gpu=index,name,memory.total --format=csv 2>&1 | head -n 5
+    echo "GPU query (hardware view - shows all MIG devices):"
+    nvidia-smi -L 2>&1 | grep MIG | head -n 3
+    echo ""
+    echo "Note: nvidia-smi shows hardware. CUDA apps respect CUDA_VISIBLE_DEVICES"
+    echo "      and will only see: $CUDA_VISIBLE_DEVICES"
 fi
 IEOF
 chmod +x "$INTEGRATED_TEST"
