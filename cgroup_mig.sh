@@ -92,7 +92,8 @@ fi
 # --- Helper: list MIG UUIDs (0-based order) ---
 list_mig_uuids() {
   nvidia-smi -L 2>/dev/null \
-  | awk -F 'UUID: ' '/^[[:space:]]*MIG[[:space:]]/{ sub(/\).*/,"",$2); print $2 }'
+  | awk -F 'UUID: ' '/^[[:space:]]*MIG[[:space:]]/{ sub(/\).*/,"",\$2); print \$2 }' \
+  | sort -u
 }
 
 # --- Resolve MIG UUID and index ---
@@ -228,29 +229,38 @@ export SLURM_CPU_BIND=none
   echo " Output:  $outfile"
 } | tee -a "$outfile"
 
-# --- Launch via systemd-run (or cgexec) to use pre-existing cgroup ---
-# systemd-run is preferred for attaching to existing cgroups
-if command -v systemd-run >/dev/null 2>&1; then
-  # Use systemd-run with --scope to run in existing cgroup slice
-  # Note: This may require adjustment based on your cgroup hierarchy
-  stdbuf -oL -eL systemd-run --scope --slice="mig/${sel_index}" --quiet \
-    srun "${srun_args[@]}" "${cmd[@]}" >> "$outfile" 2>&1 &
-elif command -v cgexec >/dev/null 2>&1; then
-  # Fallback to cgexec with absolute path
+# --- Launch via cgexec or manual cgroup assignment ---
+# cgexec is preferred but often not available; manual assignment works for most cases
+if command -v cgexec >/dev/null 2>&1; then
+  # Use cgexec with absolute cgroup path
   stdbuf -oL -eL cgexec -g ":${cgroup_path}" srun "${srun_args[@]}" "${cmd[@]}" >> "$outfile" 2>&1 &
+  pid=$!
 else
-  # Manual fallback: launch then move PID to cgroup
-  echo "WARNING: Neither systemd-run nor cgexec found; attempting manual cgroup assignment" | tee -a "$outfile"
+  # Manual method: launch srun then move its children to the cgroup
   stdbuf -oL -eL srun "${srun_args[@]}" "${cmd[@]}" >> "$outfile" 2>&1 &
   pid=$!
   
-  # Move process to cgroup (may require permissions)
+  # Give srun a moment to spawn child processes
+  sleep 0.5
+  
+  # Move srun and its descendants to cgroup
   if [[ -f "${cgroup_path}/cgroup.procs" ]]; then
+    # cgroup v2
     echo "$pid" > "${cgroup_path}/cgroup.procs" 2>/dev/null || \
-      echo "WARNING: Could not move PID $pid to cgroup (may need sudo)" | tee -a "$outfile"
+      echo "WARNING: Could not move PID $pid to cgroup (may lack permissions)" | tee -a "$outfile"
+    # Also move any child processes
+    for child_pid in $(pgrep -P "$pid" 2>/dev/null || true); do
+      echo "$child_pid" > "${cgroup_path}/cgroup.procs" 2>/dev/null || true
+    done
   elif [[ -f "${cgroup_path}/tasks" ]]; then
+    # cgroup v1
     echo "$pid" > "${cgroup_path}/tasks" 2>/dev/null || \
-      echo "WARNING: Could not move PID $pid to cgroup (may need sudo)" | tee -a "$outfile"
+      echo "WARNING: Could not move PID $pid to cgroup (may lack permissions)" | tee -a "$outfile"
+    for child_pid in $(pgrep -P "$pid" 2>/dev/null || true); do
+      echo "$child_pid" > "${cgroup_path}/tasks" 2>/dev/null || true
+    done
+  else
+    echo "WARNING: Could not find cgroup.procs or tasks file in $cgroup_path" | tee -a "$outfile"
   fi
 fi
 
