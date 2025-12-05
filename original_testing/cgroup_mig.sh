@@ -3,6 +3,7 @@
 #   * UCX-enabled NAMD must run under a PMI/PMIx launcher (e.g. srun). Do NOT run directly. 
 #   * This script is designed for interactive SLURM allocations on Vista GH nodes.
 #   * It allows multiple background runs, each on its own MIG slice and CPU block.
+#   * Uses cgroup CPU partitioning instead of taskset for resource isolation.
 
 set -euo pipefail
 
@@ -22,6 +23,7 @@ export UCX_TLS="${UCX_TLS:-self,sm,cuda_copy,cuda_ipc}"
 # --- MIG-aware CPU partitioning defaults ---
 : "${TOTAL_LOGICAL_CPUS:=72}"   # logical CPUs numbered 0..71
 : "${MIG_SLOTS:=7}"             # number of MIG slices (GH200 1g.12gb -> 7)
+: "${CORES_PER_MIG:=10}"        # cores per MIG partition (72/7 ≈ 10)
 : "${AUTO_CPU_PIN:=1}"          # 1=derive +pemap/+commap/PPN from MIG index
 : "${COMM_SHARES_CORE:=1}"      # 1=comm thread shares first core of block; 0=reserve one core
 
@@ -37,6 +39,9 @@ export UCX_TLS="${UCX_TLS:-self,sm,cuda_copy,cuda_ipc}"
 : "${SRUN_MPI:=pmix}"           # pmix|pmi2|none (OpenMPI 5 pairs well with pmix)
 : "${SRUN_OVERLAP:=1}"          # allow concurrent steps inside your allocation
 
+# Cgroup base path
+: "${CGROUP_BASE:=/sys/fs/cgroup}"
+
 # --- Parse options ---
 mig_index=""
 mig_uuid=""
@@ -48,11 +53,20 @@ while [[ $# -gt 0 ]]; do
     -h|--help)
       cat <<'USAGE'
 Usage:
-  ./run_namd_mig.sh [--mig N | --mig-uuid UUID] <input.namd> <output.log>
+  ./cgroup_mig.sh [--mig N | --mig-uuid UUID] <input.namd> <output.log>
 
 Examples:
-  ./run_namd_mig.sh --mig 2 stmv.namd test2.out
-  ./run_namd_mig.sh --mig 0 stmv.namd test0.out   # can run concurrently
+  ./cgroup_mig.sh --mig 2 stmv.namd test2.out
+  ./cgroup_mig.sh --mig 0 stmv.namd test0.out   # can run concurrently
+
+CPU Partitioning (10 cores per MIG):
+  MIG 0: cores 0-9
+  MIG 1: cores 10-19
+  MIG 2: cores 20-29
+  MIG 3: cores 30-39
+  MIG 4: cores 40-49
+  MIG 5: cores 50-59
+  MIG 6: cores 60-69
 USAGE
       exit 0;;
     *) args+=("$1"); shift ;;
@@ -110,37 +124,98 @@ else
   echo "WARNING: No MIG selected; relying on job-level GPU binding." | tee -a "$outfile"
 fi
 
-# --- Auto CPU pinning by MIG index (10 cores per MIG) ---
-if [[ "${AUTO_CPU_PIN}" == "1" && -n "${sel_index}" ]]; then
-  cores_per_mig=$(( TOTAL_LOGICAL_CPUS / MIG_SLOTS ))   # e.g., 72/7 = 10
-  start_core=$(( sel_index * cores_per_mig ))
-  end_core=$(( start_core + cores_per_mig - 1 ))
-  (( end_core >= TOTAL_LOGICAL_CPUS )) && end_core=$(( TOTAL_LOGICAL_CPUS - 1 ))
+# --- MIG-based CPU partition assignment (10 cores per MIG) ---
+if [[ -z "${sel_index}" ]]; then
+  echo "ERROR: MIG index not resolved; cannot assign CPU partition." | tee -a "$outfile"
+  exit 2
+fi
 
+[[ "$sel_index" =~ ^[0-6]$ ]] || { echo "ERROR: MIG index must be 0-6, got $sel_index"; exit 2; }
+
+# Calculate core range: MIG N gets cores [N*10, N*10+9]
+start_core=$(( sel_index * CORES_PER_MIG ))
+end_core=$(( start_core + CORES_PER_MIG - 1 ))
+
+# Ensure we don't exceed total CPUs
+(( end_core < TOTAL_LOGICAL_CPUS )) || end_core=$(( TOTAL_LOGICAL_CPUS - 1 ))
+
+# --- Auto CPU pinning for Charm++ ---
+if [[ "${AUTO_CPU_PIN}" == "1" ]]; then
   if [[ "${COMM_SHARES_CORE}" == "1" ]]; then
     PEMAP="${start_core}-${end_core}"
     COMMAP="${start_core}"
-    PPN="${cores_per_mig}"
+    PPN="${CORES_PER_MIG}"
   else
-    (( cores_per_mig > 1 )) || { echo "ERROR: cores_per_mig=$cores_per_mig too small to reserve a comm core."; exit 2; }
+    (( CORES_PER_MIG > 1 )) || { echo "ERROR: CORES_PER_MIG=$CORES_PER_MIG too small to reserve a comm core."; exit 2; }
     PEMAP="$((start_core+1))-${end_core}"
     COMMAP="${start_core}"
-    PPN="$((cores_per_mig - 1))"
+    PPN="$((CORES_PER_MIG - 1))"
   fi
 
   {
-    echo "CPU pinning by MIG index:"
-    echo "  TOTAL_LOGICAL_CPUS=$TOTAL_LOGICAL_CPUS  MIG_SLOTS=$MIG_SLOTS  cores_per_mig=$cores_per_mig"
-    echo "  MIG index=$sel_index  -> core block ${start_core}-${end_core}"
+    echo "CPU partition by MIG index:"
+    echo "  MIG_SLOTS=$MIG_SLOTS  CORES_PER_MIG=$CORES_PER_MIG"
+    echo "  MIG index=$sel_index  -> core range ${start_core}-${end_core}"
     echo "  COMM_SHARES_CORE=$COMM_SHARES_CORE  => COMMAP=$COMMAP  PEMAP=$PEMAP  PPN=$PPN"
+  } | tee -a "$outfile"
+fi
+
+# --- Create cgroup for this MIG partition ---
+cgroup_name="namd_mig${sel_index}_$$"
+cgroup_path="${CGROUP_BASE}/${cgroup_name}"
+
+cleanup_cgroup() {
+  if [[ -d "$cgroup_path" ]]; then
+    echo "Cleaning up cgroup: $cgroup_path" | tee -a "$outfile"
+    rmdir "$cgroup_path" 2>/dev/null || true
+  fi
+}
+trap cleanup_cgroup EXIT
+
+# Create cgroup (cgroup v2 syntax)
+if [[ -f "${CGROUP_BASE}/cgroup.controllers" ]]; then
+  # cgroup v2
+  mkdir -p "$cgroup_path"
+  
+  # Set CPU affinity (cores start_core to end_core)
+  cpu_list="${start_core}-${end_core}"
+  echo "$cpu_list" > "${cgroup_path}/cpuset.cpus" || {
+    echo "ERROR: Failed to set cpuset.cpus. May need root/sudo or delegated cgroup permissions." | tee -a "$outfile"
+    exit 2
+  }
+  
+  # Set memory nodes (typically 0 for single-socket, adjust if needed)
+  echo "0" > "${cgroup_path}/cpuset.mems" 2>/dev/null || true
+  
+  {
+    echo "Created cgroup (v2): $cgroup_path"
+    echo "  cpuset.cpus: $cpu_list"
+  } | tee -a "$outfile"
+else
+  # cgroup v1 (fallback)
+  cpuset_path="${CGROUP_BASE}/cpuset/${cgroup_name}"
+  mkdir -p "$cpuset_path"
+  
+  cpu_list="${start_core}-${end_core}"
+  echo "$cpu_list" > "${cpuset_path}/cpuset.cpus" || {
+    echo "ERROR: Failed to set cpuset.cpus. May need root/sudo or delegated cgroup permissions." | tee -a "$outfile"
+    exit 2
+  }
+  echo "0" > "${cpuset_path}/cpuset.mems" 2>/dev/null || true
+  
+  cgroup_path="$cpuset_path"
+  {
+    echo "Created cgroup (v1): $cgroup_path"
+    echo "  cpuset.cpus: $cpu_list"
   } | tee -a "$outfile"
 fi
 
 # --- Must be inside a SLURM allocation for srun to work here ---
 if [[ -z "${SLURM_JOB_ID:-}" ]]; then
-  echo "ERROR: Not inside an interactive SLURM allocation. Use 'salloc' or your site’s interactive queue." | tee -a "$outfile"
+  echo "ERROR: Not inside an interactive SLURM allocation. Use 'salloc' or your site's interactive queue." | tee -a "$outfile"
   exit 2
 fi
+
 # --- Build NAMD command (Charm++) ---
 cmd=( "$namd_exec" +ppn "$PPN" +pemap "$PEMAP" +commap "$COMMAP" +devices "$DEVICES" "$infile" )
 
@@ -163,20 +238,36 @@ export SLURM_CPU_BIND=none
 
 # --- Log header ---
 {
-  echo "[$(date '+%F %T')] Starting NAMD"
+  echo "[$(date '+%F %T')] Starting NAMD with cgroup CPU partitioning"
   echo " Host: $(hostname)"
   echo " SLURM_JOB_ID: ${SLURM_JOB_ID:-<none>}"
   echo " CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES:-<not set>}"
   echo " UCX_TLS: ${UCX_TLS:-<not set>}"
+  echo " Cgroup: $cgroup_path"
+  echo " CPU range: ${start_core}-${end_core}"
   echo " PEMAP: $PEMAP   COMMAP: $COMMAP   PPN: $PPN   DEVICES: $DEVICES"
   echo " Launcher: srun ${srun_args[*]}"
   echo " Command: ${cmd[*]}"
   echo " Output:  $outfile"
 } | tee -a "$outfile"
 
-# --- Launch via srun in the background (line-buffered output) ---
-stdbuf -oL -eL srun "${srun_args[@]}" taskset -c "${PEMAP}" "${cmd[@]}" >> "$outfile" 2>&1 &
+# --- Launch via cgexec + srun in the background (line-buffered output) ---
+# Move the srun process into the cgroup using cgexec
+if command -v cgexec >/dev/null 2>&1; then
+  stdbuf -oL -eL cgexec -g cpuset:"$cgroup_name" srun "${srun_args[@]}" "${cmd[@]}" >> "$outfile" 2>&1 &
+else
+  # Fallback: manually add PID to cgroup (less reliable for srun)
+  stdbuf -oL -eL srun "${srun_args[@]}" "${cmd[@]}" >> "$outfile" 2>&1 &
+  pid=$!
+  
+  # Attempt to move process to cgroup
+  if [[ -f "${cgroup_path}/cgroup.procs" ]]; then
+    echo "$pid" > "${cgroup_path}/cgroup.procs" 2>/dev/null || echo "Warning: Could not move PID $pid to cgroup" | tee -a "$outfile"
+  elif [[ -f "${cgroup_path}/tasks" ]]; then
+    echo "$pid" > "${cgroup_path}/tasks" 2>/dev/null || echo "Warning: Could not move PID $pid to cgroup" | tee -a "$outfile"
+  fi
+fi
 
 pid=$!
-echo "[$(date '+%F %T')] Launched (PID $pid). Use 'tail -f $outfile' to monitor." | tee -a "$outfile"
+echo "[$(date '+%F %T')] Launched in cgroup (PID $pid). Use 'tail -f $outfile' to monitor." | tee -a "$outfile"
 echo "PID $pid"
