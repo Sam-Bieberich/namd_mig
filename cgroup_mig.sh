@@ -39,8 +39,8 @@ export UCX_TLS="${UCX_TLS:-self,sm,cuda_copy,cuda_ipc}"
 : "${SRUN_MPI:=pmix}"           # pmix|pmi2|none (OpenMPI 5 pairs well with pmix)
 : "${SRUN_OVERLAP:=1}"          # allow concurrent steps inside your allocation
 
-# Cgroup base path
-: "${CGROUP_BASE:=/sys/fs/cgroup}"
+# Cgroup base path (pre-existing MIG cgroups)
+: "${CGROUP_MIG_BASE:=/sys/fs/cgroup/mig}"
 
 # --- Parse options ---
 mig_index=""
@@ -160,54 +160,31 @@ if [[ "${AUTO_CPU_PIN}" == "1" ]]; then
   } | tee -a "$outfile"
 fi
 
-# --- Create cgroup for this MIG partition ---
-cgroup_name="namd_mig${sel_index}_$$"
-cgroup_path="${CGROUP_BASE}/${cgroup_name}"
+# --- Use pre-existing cgroup for this MIG partition ---
+cgroup_path="${CGROUP_MIG_BASE}/${sel_index}"
 
-cleanup_cgroup() {
-  if [[ -d "$cgroup_path" ]]; then
-    echo "Cleaning up cgroup: $cgroup_path" | tee -a "$outfile"
-    rmdir "$cgroup_path" 2>/dev/null || true
-  fi
-}
-trap cleanup_cgroup EXIT
+# Verify cgroup exists
+if [[ ! -d "$cgroup_path" ]]; then
+  echo "ERROR: Cgroup not found: $cgroup_path" | tee -a "$outfile"
+  echo "       Expected pre-existing cgroups at ${CGROUP_MIG_BASE}/{0..6}" | tee -a "$outfile"
+  exit 2
+fi
 
-# Create cgroup (cgroup v2 syntax)
-if [[ -f "${CGROUP_BASE}/cgroup.controllers" ]]; then
-  # cgroup v2
-  mkdir -p "$cgroup_path"
-  
-  # Set CPU affinity (cores start_core to end_core)
-  cpu_list="${start_core}-${end_core}"
-  echo "$cpu_list" > "${cgroup_path}/cpuset.cpus" || {
-    echo "ERROR: Failed to set cpuset.cpus. May need root/sudo or delegated cgroup permissions." | tee -a "$outfile"
-    exit 2
-  }
-  
-  # Set memory nodes (typically 0 for single-socket, adjust if needed)
-  echo "0" > "${cgroup_path}/cpuset.mems" 2>/dev/null || true
-  
+# Verify cpuset configuration (informational)
+if [[ -f "${cgroup_path}/cpuset.cpus" ]]; then
+  actual_cpus=$(cat "${cgroup_path}/cpuset.cpus" 2>/dev/null || echo "<unreadable>")
   {
-    echo "Created cgroup (v2): $cgroup_path"
-    echo "  cpuset.cpus: $cpu_list"
+    echo "Using pre-existing cgroup: $cgroup_path"
+    echo "  cpuset.cpus: $actual_cpus"
+  } | tee -a "$outfile"
+elif [[ -f "${cgroup_path}/cpus" ]]; then
+  actual_cpus=$(cat "${cgroup_path}/cpus" 2>/dev/null || echo "<unreadable>")
+  {
+    echo "Using pre-existing cgroup: $cgroup_path"
+    echo "  cpus: $actual_cpus"
   } | tee -a "$outfile"
 else
-  # cgroup v1 (fallback)
-  cpuset_path="${CGROUP_BASE}/cpuset/${cgroup_name}"
-  mkdir -p "$cpuset_path"
-  
-  cpu_list="${start_core}-${end_core}"
-  echo "$cpu_list" > "${cpuset_path}/cpuset.cpus" || {
-    echo "ERROR: Failed to set cpuset.cpus. May need root/sudo or delegated cgroup permissions." | tee -a "$outfile"
-    exit 2
-  }
-  echo "0" > "${cpuset_path}/cpuset.mems" 2>/dev/null || true
-  
-  cgroup_path="$cpuset_path"
-  {
-    echo "Created cgroup (v1): $cgroup_path"
-    echo "  cpuset.cpus: $cpu_list"
-  } | tee -a "$outfile"
+  echo "WARNING: Could not verify cpuset configuration in $cgroup_path" | tee -a "$outfile"
 fi
 
 # --- Must be inside a SLURM allocation for srun to work here ---
@@ -244,30 +221,39 @@ export SLURM_CPU_BIND=none
   echo " CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES:-<not set>}"
   echo " UCX_TLS: ${UCX_TLS:-<not set>}"
   echo " Cgroup: $cgroup_path"
-  echo " CPU range: ${start_core}-${end_core}"
+  echo " Expected CPU range: ${start_core}-${end_core}"
   echo " PEMAP: $PEMAP   COMMAP: $COMMAP   PPN: $PPN   DEVICES: $DEVICES"
   echo " Launcher: srun ${srun_args[*]}"
   echo " Command: ${cmd[*]}"
   echo " Output:  $outfile"
 } | tee -a "$outfile"
 
-# --- Launch via cgexec + srun in the background (line-buffered output) ---
-# Move the srun process into the cgroup using cgexec
-if command -v cgexec >/dev/null 2>&1; then
-  stdbuf -oL -eL cgexec -g cpuset:"$cgroup_name" srun "${srun_args[@]}" "${cmd[@]}" >> "$outfile" 2>&1 &
+# --- Launch via systemd-run (or cgexec) to use pre-existing cgroup ---
+# systemd-run is preferred for attaching to existing cgroups
+if command -v systemd-run >/dev/null 2>&1; then
+  # Use systemd-run with --scope to run in existing cgroup slice
+  # Note: This may require adjustment based on your cgroup hierarchy
+  stdbuf -oL -eL systemd-run --scope --slice="mig/${sel_index}" --quiet \
+    srun "${srun_args[@]}" "${cmd[@]}" >> "$outfile" 2>&1 &
+elif command -v cgexec >/dev/null 2>&1; then
+  # Fallback to cgexec with absolute path
+  stdbuf -oL -eL cgexec -g ":${cgroup_path}" srun "${srun_args[@]}" "${cmd[@]}" >> "$outfile" 2>&1 &
 else
-  # Fallback: manually add PID to cgroup (less reliable for srun)
+  # Manual fallback: launch then move PID to cgroup
+  echo "WARNING: Neither systemd-run nor cgexec found; attempting manual cgroup assignment" | tee -a "$outfile"
   stdbuf -oL -eL srun "${srun_args[@]}" "${cmd[@]}" >> "$outfile" 2>&1 &
   pid=$!
   
-  # Attempt to move process to cgroup
+  # Move process to cgroup (may require permissions)
   if [[ -f "${cgroup_path}/cgroup.procs" ]]; then
-    echo "$pid" > "${cgroup_path}/cgroup.procs" 2>/dev/null || echo "Warning: Could not move PID $pid to cgroup" | tee -a "$outfile"
+    echo "$pid" > "${cgroup_path}/cgroup.procs" 2>/dev/null || \
+      echo "WARNING: Could not move PID $pid to cgroup (may need sudo)" | tee -a "$outfile"
   elif [[ -f "${cgroup_path}/tasks" ]]; then
-    echo "$pid" > "${cgroup_path}/tasks" 2>/dev/null || echo "Warning: Could not move PID $pid to cgroup" | tee -a "$outfile"
+    echo "$pid" > "${cgroup_path}/tasks" 2>/dev/null || \
+      echo "WARNING: Could not move PID $pid to cgroup (may need sudo)" | tee -a "$outfile"
   fi
 fi
 
 pid=$!
-echo "[$(date '+%F %T')] Launched in cgroup (PID $pid). Use 'tail -f $outfile' to monitor." | tee -a "$outfile"
+echo "[$(date '+%F %T')] Launched in cgroup ${cgroup_path} (PID $pid). Use 'tail -f $outfile' to monitor." | tee -a "$outfile"
 echo "PID $pid"
