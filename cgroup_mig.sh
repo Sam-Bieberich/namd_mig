@@ -92,7 +92,7 @@ fi
 # --- Helper: list MIG UUIDs (0-based order) ---
 list_mig_uuids() {
   nvidia-smi -L 2>/dev/null \
-  | awk -F 'UUID: ' '/^[[:space:]]*MIG[[:space:]]/{ sub(/\).*/,"",\$2); print \$2 }' \
+  | awk -F 'UUID: ' '/^[[:space:]]*MIG[[:space:]]/{ sub(/\).*/,"",$2); print $2 }' \
   | sort -u
 }
 
